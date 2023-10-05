@@ -18,9 +18,8 @@ Chapter: Configuring Weighted Random Early Detection
 
 https://www.cisco.com/c/en/us/td/docs/ios/qos/configuration/guide/12_2sr/qos_12_2sr_book/config_wred.html
 """
-import random
 
-from ns.port.port import Port
+from ns.port.red_port import REDPort
 
 
 class PolicyMap:
@@ -77,14 +76,17 @@ class PolicyMap:
         return self.policies
 
 
-class WREDPort(Port):
-    """
+class WREDPort(REDPort):
+    """Models an output port on a switch with a given rate and buffer size (in either bytes
+        or packet counts), using Weighted Early Random Detection (WRED) mechanism to drop packets.
+
     There are two types of values can be used by WRED to calculate the drop probability. First,
     prec_based argument enables IP Precedence value of a packet to calculate the drop probability.
     Second, dscp_based argument category uses the DSCP value of a packet to calculate the drop
     probability. Here we adopt the first one, which means that the flow id will be used to find
     the priority level from the policy map, then retrieve the corresponding drop probability.
 
+    TODO
     Parameters
         ----------
         env: simpy.Environment
@@ -93,12 +95,34 @@ class WREDPort(Port):
             a dictionary that contains {flow_id -> priority class}.
         rate: float
             the bit rate of the port.
-
+        num_priorities:
+            TODO
+        max_threshold: integer
+            The maximum (average) queue length threshold, beyond which packets will be
+            dropped at the maximum probability. It represents percentage among [0, 100].
+        max_probability: float
+            The maximum probability (which is equivalent to 1 / mark probability denominator)
+            is the fraction of packets dropped when the average queue length is at the
+            maximum threshold, which is 'max_threshold'. The rate of packet drop increases
+            linearly as the average queue length increases, until the average queue length
+            reaches the maximum threshold, 'max_threshold'. All packets will be dropped when
+            'qlimit' is exceeded.
         weight_factor: float
             The exponential weight factor 'n' for computing the average queue size.
             average = (old_average * (1-1/2^n)) + (current_queue_size * 1/2^n)
             for byte mode, n is usually set as 9;
             for packet mode, n is usually set as 6.
+        element_id: int
+            the element id of this port.
+        limit_bytes: bool
+            if True, the queue length limits will be based on bytes; if False, the queue
+            length limits will be based on packets.
+        zero_downstream_buffer: bool
+            if True, assume that the downstream element does not have any buffers,
+            and backpressure is in effect so that all waiting packets queue up in this
+            element's buffer.
+        debug: bool
+            If True, prints more verbose debug information.
     """
 
     def __init__(
@@ -119,16 +143,17 @@ class WREDPort(Port):
         super().__init__(
             env,
             rate,
+            max_threshold=max_threshold,
+            min_threshold=max_threshold // 2,
+            max_probability=max_probability,
+            weight_factor=weight_factor,
             element_id=element_id,
             qlimit=qlimit,
             limit_bytes=limit_bytes,
             zero_downstream_buffer=zero_downstream_buffer,
             debug=debug,
         )
-        self.max_probability = max_probability
         self.policies = PolicyMap(num_priorities, max_threshold).get_policy_map()
-        self.weight_factor = weight_factor
-        self.average_queue_size = 0
 
         if isinstance(priorities, dict):
             self.priorities = priorities
@@ -143,15 +168,16 @@ class WREDPort(Port):
 
     def policy_mapper(self, flow_id):
         """Map the maximum and minimum thresholds for packets."""
+
         priority_class = self.priorities[flow_id]
         min_threshold = self.policies[priority_class]["min_threshold"]
         max_threshold = self.policies[priority_class]["max_threshold"]
-        return min_threshold, max_threshold
+        self.min_threshold = min_threshold
+        self.max_threshold = max_threshold
 
     def put(self, packet):
         """Send a packet to this element."""
-        self.packets_received += 1
 
-        min_threshold, max_thredhold = self.policy_mapper(packet.flow_id)
-
-        # TODO: Others are the same with RED
+        # refresh the max and min threshold based on the flow id.
+        self.policy_mapper(packet.flow_id)
+        super().put(packet)
