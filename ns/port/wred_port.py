@@ -96,7 +96,7 @@ class WREDPort(REDPort):
         rate: float
             the bit rate of the port.
         num_priorities:
-            TODO
+            The number of priority classes.
         max_threshold: integer
             The maximum (average) queue length threshold, beyond which packets will be
             dropped at the maximum probability. It represents percentage among [0, 100].
