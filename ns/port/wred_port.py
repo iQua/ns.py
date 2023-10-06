@@ -32,30 +32,33 @@ class PolicyMap:
     num_priorities: int
         The number of priority classes.
     max_threshold: int
-        The maximum threshold for the WRED, and the minimum thresholds are spaced evenly
-        between half and the entire maximum threshold. Note that the maximum threshold is
-        an integer between [0, 100], which represents the percentage of the queue limit.
+        The maximum threshold for the WRED.
+    min_threshold: int (or None)
+        The minimum threshold for the WRED. If None, the minimum thresholds are spaced evenly
+        between half and the entire maximum threshold.
     """
 
     def __init__(
         self,
         num_priorities: int = 8,
         max_threshold: int = 40,
+        min_threshold: int = None,
     ):
         self.policies = {}
         self.num_priorities = num_priorities
         self.max_threshold = max_threshold
+        self.min_threshold = min_threshold or max_threshold // 2
 
         self.set_map()
 
     def add_policy(self, priority_class: int, min_threshold: int, max_threshold: int):
         """Add a new policy to the policy map."""
 
-        assert 0 <= min_threshold <= max_threshold <= 100, "Invalid threshold setting!"
+        assert 0 <= min_threshold <= max_threshold, "Invalid threshold setting!"
 
         self.policies[priority_class] = {
-            "min_threshold": min_threshold / 100,
-            "max_threshold": max_threshold / 100,
+            "min_threshold": min_threshold,
+            "max_threshold": max_threshold,
         }
 
     def set_map(self):
@@ -64,11 +67,10 @@ class PolicyMap:
         are spaced evenly between half and the entire maximum threshold.
         """
 
-        min_threshold = self.max_threshold // 2
-        step_size = (self.max_threshold - min_threshold) // self.num_priorities
+        step_size = (self.max_threshold - self.min_threshold) // self.num_priorities
         for priority_class in range(self.num_priorities):
-            self.add_policy(priority_class, min_threshold, self.max_threshold)
-            min_threshold += step_size
+            self.add_policy(priority_class, self.min_threshold, self.max_threshold)
+            self.min_threshold += step_size
 
     def get_policy_map(self):
         """Get the policy map."""
@@ -86,7 +88,6 @@ class WREDPort(REDPort):
     probability. Here we adopt the first one, which means that the flow id will be used to find
     the priority level from the policy map, then retrieve the corresponding drop probability.
 
-    TODO
     Parameters
         ----------
         env: simpy.Environment
@@ -97,9 +98,6 @@ class WREDPort(REDPort):
             the bit rate of the port.
         num_priorities:
             The number of priority classes.
-        max_threshold: integer
-            The maximum (average) queue length threshold, beyond which packets will be
-            dropped at the maximum probability. It represents percentage among [0, 100].
         max_probability: float
             The maximum probability (which is equivalent to 1 / mark probability denominator)
             is the fraction of packets dropped when the average queue length is at the
@@ -107,6 +105,14 @@ class WREDPort(REDPort):
             linearly as the average queue length increases, until the average queue length
             reaches the maximum threshold, 'max_threshold'. All packets will be dropped when
             'qlimit' is exceeded.
+        max_threshold: integer
+            The maximum (average) queue length threshold, beyond which packets will be
+            dropped at the maximum probability.
+        min_threshold: integer (or None)
+            The minimum (average) queue length threshold to start dropping packets. This
+            threshold should be set high enough to maximize the link utilization. If the
+            minimum threshold is too low, packets may be dropped unnecessarily, and the
+            transmission link will not be fully used.
         weight_factor: float
             The exponential weight factor 'n' for computing the average queue size.
             average = (old_average * (1-1/2^n)) + (current_queue_size * 1/2^n)
@@ -131,8 +137,9 @@ class WREDPort(REDPort):
         priorities,
         rate: float,
         num_priorities: int,
-        max_threshold: int,
         max_probability: float,
+        max_threshold: int,
+        min_threshold: int = None,
         weight_factor: int = 6,
         element_id: int = None,
         qlimit: int = None,
@@ -140,11 +147,17 @@ class WREDPort(REDPort):
         zero_downstream_buffer: bool = False,
         debug: bool = False,
     ):
+        # setup the policy map
+        self.policies = PolicyMap(
+            num_priorities, max_threshold, min_threshold
+        ).get_policy_map()
+
+        min_threshold = min_threshold or max_threshold // 2
         super().__init__(
             env,
             rate,
             max_threshold=max_threshold,
-            min_threshold=max_threshold // 2,
+            min_threshold=min_threshold,
             max_probability=max_probability,
             weight_factor=weight_factor,
             element_id=element_id,
@@ -153,7 +166,6 @@ class WREDPort(REDPort):
             zero_downstream_buffer=zero_downstream_buffer,
             debug=debug,
         )
-        self.policies = PolicyMap(num_priorities, max_threshold).get_policy_map()
 
         if isinstance(priorities, dict):
             self.priorities = priorities
